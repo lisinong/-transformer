@@ -1,0 +1,3 @@
+To build a transformer from scratch, we stack layers of multi-head self-attention and position-wise feed-forward networks with residual connections and layer normalization.
+This tiny corpus is only for demonstration. Replace data/input.txt with your own training text to get meaningful results.
+The model learns next-character prediction with a causal mask so it cannot peek into the future.

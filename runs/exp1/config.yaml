@@ -1,0 +1,33 @@
+data:
+  batch_size: 16
+  block_size: 256
+  num_workers: 0
+  path: data/input.txt
+  train_frac: 0.9
+device: auto
+model:
+  d_ff: 1024
+  d_model: 256
+  dropout: 0.1
+  n_heads: 4
+  n_layers: 4
+  use_bias: true
+  vocab_size: 256
+optim:
+  betas:
+  - 0.9
+  - 0.95
+  lr: 0.0003
+  weight_decay: 0.01
+run_name: exp1
+sched:
+  min_lr: 5.0e-05
+  warmup_steps: 100
+seed: 42
+train:
+  amp: true
+  ckpt_dir: runs
+  eval_every: 200
+  grad_clip: 1.0
+  log_every: 50
+  max_steps: 1000
