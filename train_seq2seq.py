@@ -8,8 +8,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
-
-from transformer.data_seq2seq import get_loaders, PAD
+from transformer.data import get_loaders_from_ted, PAD
 from transformer.model_seq2seq import TransformerSeq2Seq
 
 
@@ -33,7 +32,7 @@ def save_curve(history, out_png):
     train_loss = [h["train_loss"] for h in history]
     val_loss = [h["val_loss"] for h in history]
     plt.figure()
-    plt.plot(steps, train_loss, label="train");
+    plt.plot(steps, train_loss, label="train")
     plt.plot(steps, val_loss, label="val")
     plt.xlabel("step")
     plt.ylabel("loss")
@@ -46,24 +45,37 @@ def train(cfg):
     set_seed(cfg["seed"])
     device = resolve_device(cfg["device"])
     run = cfg["run_name"]
-    ckpt_dir = os.path.join(cfg["train"]["ckpt_dir"], run);
+    ckpt_dir = os.path.join(cfg["train"]["ckpt_dir"], run)
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    tr_loader, va_loader = get_loaders(
-        cfg["data"]["src_path"], cfg["data"]["tgt_path"],
-        cfg["data"]["max_src_len"], cfg["data"]["max_tgt_len"],
-        cfg["data"]["batch_size"], cfg["data"]["train_frac"],
-        cfg["data"]["num_workers"], cfg["seed"]
+    tr_loader, va_loader, te_loader, bos, eos, pad = get_loaders_from_ted(
+        zip_path=cfg["data"].get("zip_path", None),
+        transcripts_csv=cfg["data"].get("transcripts_csv", None),
+        meta_csv=cfg["data"].get("meta_csv", None),
+        src_field=cfg["data"].get("src_field", "transcript"),
+        tgt_field=cfg["data"].get("tgt_field", "title"),
+        max_src_len=cfg["data"]["max_src_len"],
+        max_tgt_len=cfg["data"]["max_tgt_len"],
+        min_src_chars=cfg["data"].get("min_src_chars", 64),
+        batch_size=cfg["data"]["batch_size"],
+        num_workers=cfg["data"]["num_workers"],
+        seed=cfg["seed"],
+        train_frac=cfg["data"].get("train_frac", 0.96),
+        valid_frac=cfg["data"].get("valid_frac", 0.02),
+        test_frac=cfg["data"].get("test_frac", 0.02),
     )
 
-    model = TransformerSeq2Seq(**cfg["model"]).to(device)
+    model_cfg = dict(cfg["model"])
+    # byte-level vocab: 0..255 plus BOS/EOS/PAD mapped to 1/2/0, so keep vocab_size >= 256 or set as config
+    model = TransformerSeq2Seq(**model_cfg).to(device)
+
     opt = AdamW(model.parameters(), lr=cfg["optim"]["lr"], betas=tuple(cfg["optim"]["betas"]),
                 weight_decay=cfg["optim"]["weight_decay"])
     sched = CosineAnnealingLR(opt, T_max=cfg["train"]["max_steps"] - cfg["sched"]["warmup_steps"],
                               eta_min=cfg["sched"]["min_lr"])
     scaler = torch.cuda.amp.GradScaler(enabled=cfg["train"]["amp"] and device.type == "cuda")
 
-    hist = []
+    hist = [];
     step = 0
     pbar = tqdm(total=cfg["train"]["max_steps"], desc="training", ncols=100)
     while step < cfg["train"]["max_steps"]:
@@ -89,7 +101,8 @@ def train(cfg):
 
             if step < cfg["sched"]["warmup_steps"]:
                 lr = cfg["optim"]["lr"] * (step + 1) / max(1, cfg["sched"]["warmup_steps"])
-                for g in opt.param_groups: g["lr"] = lr
+                for g in opt.param_groups:
+                    g["lr"] = lr
             else:
                 sched.step()
 
@@ -97,7 +110,7 @@ def train(cfg):
             pbar.update(1)
 
             if step % cfg["train"]["log_every"] == 0:
-                model.eval();
+                model.eval()
                 vals = []
                 with torch.no_grad():
                     for s2, ti2, to2, sk2, tk2 in va_loader:
@@ -113,7 +126,7 @@ def train(cfg):
 
             if step % cfg["train"]["eval_every"] == 0:
                 torch.save({"model": model.state_dict(), "config": cfg}, os.path.join(ckpt_dir, "model.pt"))
-                import yaml as _y;
+                import yaml as _y
                 _y.safe_dump(cfg, open(os.path.join(ckpt_dir, "config.yaml"), "w"))
                 try:
                     save_curve(hist, os.path.join(ckpt_dir, "train_curve.png"))

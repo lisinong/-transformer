@@ -2,34 +2,43 @@ run_name: exp_seq2seq
 seed: 42
 device: auto
 data:
-  src_path: data/src.txt
-  tgt_path: data/tgt.txt
-  max_src_len: 128
+  # Option A: point to the ZIP (recommended for Kaggle TED dataset)
+# zip_path: data/TED_Talks.zip
+
+  # Option B: or give paths to csv files (if you extract them):
+  transcripts_csv: data/transcripts.csv
+  meta_csv: data/ted_main.csv
+
+  src_field: transcript    # input
+  tgt_field: title         # output; you can switch to 'description'
+  min_src_chars: 64
+  max_src_len: 2048
   max_tgt_len: 128
-  train_frac: 0.95
+  batch_size: 8            # transcripts are long
   num_workers: 0
-  batch_size: 64
+  # Splits (sum to 1.0)
+  train_frac: 0.96
+  valid_frac: 0.02
+  test_frac:  0.02
 model:
-  vocab_size: 259          # 0..255 bytes plus BOS=256, EOS=257, PAD=258
-  d_model: 256
-  n_heads: 4
-  d_ff: 1024
-  n_layers: 4
+  vocab_size: 260          # byte-level 0..255 plus a couple of specials is safe; > 256
+  d_model: 512
+  n_heads: 8
+  d_ff: 2048
+  n_layers: 6
   dropout: 0.1
   use_bias: true
 optim:
   lr: 0.0003
   weight_decay: 0.01
-  betas: [0.9, 0.95]
+  betas: [0.9, 0.98]
 train:
-  max_steps: 4000
-  log_every: 50
-  eval_every: 200
+  max_steps: 20000
+  log_every: 100
+  eval_every: 1000
   ckpt_dir: runs
   grad_clip: 1.0
   amp: true
 sched:
-  warmup_steps: 200
+  warmup_steps: 2000
   min_lr: 0.00003
-decode:
-  max_len: 128
