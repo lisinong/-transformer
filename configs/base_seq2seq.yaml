@@ -1,0 +1,35 @@
+run_name: exp_seq2seq
+seed: 42
+device: auto
+data:
+  src_path: data/src.txt
+  tgt_path: data/tgt.txt
+  max_src_len: 128
+  max_tgt_len: 128
+  train_frac: 0.95
+  num_workers: 0
+  batch_size: 64
+model:
+  vocab_size: 259          # 0..255 bytes plus BOS=256, EOS=257, PAD=258
+  d_model: 256
+  n_heads: 4
+  d_ff: 1024
+  n_layers: 4
+  dropout: 0.1
+  use_bias: true
+optim:
+  lr: 0.0003
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+train:
+  max_steps: 4000
+  log_every: 50
+  eval_every: 200
+  ckpt_dir: runs
+  grad_clip: 1.0
+  amp: true
+sched:
+  warmup_steps: 200
+  min_lr: 0.00003
+decode:
+  max_len: 128

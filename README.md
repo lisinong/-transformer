@@ -1,48 +1,45 @@
-# Minimal Transformer (from-scratch) Experiment
+# Minimal Transformer（从零实现）实验
 
-This repo contains a clean, educational PyTorch implementation of an **encoder-only Transformer** for character-level next-token prediction.
-It implements **Multi-Head Self-Attention**, **Position-wise FFN**, **Residual + LayerNorm**, and **Sinusoidal Positional Encoding** — matching the requirements of your assignment.
+此仓库包含一个简洁的 PyTorch 实现：一个**译码器-编码器的 Transformer模型**，。实现包括：多头自注意力、位置前馈网络（FFN）、残差连接 + LayerNorm、以及正弦位置编码等内容。
 
-## Features
-- From-scratch modules: Scaled Dot-Product Attention, Multi-Head Self-Attention, FFN, Positional Encoding, Residual + LayerNorm.
-- Config-driven training via YAML (no external datasets required).
-- Tiny demo dataset included at `data/input.txt`.
-- Reproducible runs, model checkpoints, and training curves.
+## 特性
+- 从零实现的模块：Scaled Dot-Product Attention、Multi-Head Self-Attention、FFN、Positional Encoding、Residual + LayerNorm。
+- 通过 YAML 配置驱动训练（不依赖外部数据集）。
+- 可复现运行、模型检查点与训练曲线输出。
 
-## Quickstart
+## 快速开始
 
 ```bash
-# (Optional) create env
+# （可选）创建并激活虚拟环境
 conda create -n transformer python=3.10 -y
 conda activate transformer
 
-# Install deps
+# 安装依赖
 pip install -r requirements.txt
 
-# Train (uses configs/base.yaml)
-python train.py --config configs/base.yaml
+# 训练（使用 configs/base.yaml）
+python train_seq2seq.py --config configs/base.yaml
 ```
 
-After training, artifacts are saved to `runs/<run_name>/`:
-- `model.pt`: trained weights
-- `config.yaml`: resolved config
-- `train_curve.png`: loss plot
+训练完成后，产物会保存到 `runs/<run_name>/`：
+- `model.pt`: 训练好的权重
+- `config.yaml`: 解析后的配置
+- `train_curve.png`: 损失曲线图
 
-## Evaluate / Generate
+## 评估 / 生成
+
 ```bash
-# Evaluate on validation split; also sample generated text
-python eval.py --ckpt runs/exp1/model.pt --prompt "The meaning of life " --steps 200
+# 在验证集上评估，并示例生成文本
+python eval_seq2seq.py --ckpt runs/exp1/model.pt --prompt "The meaning of life " --steps 200
 ```
 
-## Files
-- `transformer/modules.py` – attention, MHA, FFN, positional encoding, residual+LN
-- `transformer/model.py` – `TransformerEncoderLM` (embeddings, N encoder layers, LM head)
-- `transformer/data.py` – byte-level char dataset + splits, batching, masks
-- `train.py` – training loop with AdamW, cosine schedule, gradient clipping
-- `eval.py` – evaluation & text generation
-- `configs/base.yaml` – hyperparameters
-- `data/input.txt` – tiny sample corpus (you can replace with your own text)
+## 文件说明
+- `transformer/modules.py` – 注意力、MHA、FFN、位置编码、残差 + LN
+- `transformer/seq2seq.py` – 译码器-编码器 Transformer 实现
 
-## Notes
-- This is an *educational*, minimal build. For larger corpora, consider enabling mixed precision (`--amp`) and increasing model size.
-- The implementation intentionally avoids calling `nn.TransformerEncoder` to align with the "hand-rolled" requirement.
+- `train.py` – 训练循环（AdamW、余弦学习率、梯度裁剪）
+- `eval.py` – 评估与文本生成
+- `configs/base.yaml` – 超参数配置
+- `data/input.txt` – 小型示例语料（可替换为你自己的文本）
+
+
