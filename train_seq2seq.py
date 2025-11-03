@@ -154,7 +154,7 @@ def train(cfg):
         transcripts_csv=cfg["data"].get("transcripts_csv", None),
         meta_csv=cfg["data"].get("meta_csv", None),
         src_field=cfg["data"].get("src_field", "transcript"),
-        tgt_field=cfg["data"].get("tgt_field", "title"),
+        tgt_field=cfg["data"].get("tgt_field", "description"),
         max_src_len=cfg["data"]["max_src_len"],
         max_tgt_len=cfg["data"]["max_tgt_len"],
         min_src_chars=cfg["data"].get("min_src_chars", 64),

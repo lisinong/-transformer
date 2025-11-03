@@ -218,12 +218,17 @@ class TransformerSeq2Seq(nn.Module):
         # 4. 自回归生成循环
         for _ in range(max_new_tokens):
             # 解码一步
-            logits = self.decode(encoder_output, tgt, src_key_padding_mask, None, None)
+            logits = self.decode(encoder_output, tgt, src_key_padding_mask, None)
 
             # 只取最后一个时间步的 logits 进行预测
             # 形状为 [N, vocab_size]
             next_token_logits = logits[:, -1, :]
-
+            next_token_logits[:, pad] = float("-inf")
+            # 从第二步开始禁止再次选 BOS（第一步必须是 BOS）
+            if tgt.size(1) > 1:
+                next_token_logits[:, bos] = float("-inf")
+            # 如能拿到 UNK 的 id（比如 sp.unk_id()），也可以屏蔽：
+            # next_token_logits[:, unk] = float("-inf")
             # 5. 贪心策略：选择概率最高的 token
             # 形状为 [N, 1]
             next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(1)

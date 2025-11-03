@@ -11,9 +11,9 @@ data:
   meta_csv: data/ted_main.csv
 
   src_field: transcript    # input
-  tgt_field: title         # output; you can switch to 'description'
+  tgt_field: description         # output; you can switch to 'description'
   min_src_chars: 64      # filter too short samples
-  max_src_len: 1024
+  max_src_len: 2048
   max_tgt_len: 128
   batch_size: 128            # transcripts are long
   num_workers: 8
@@ -65,5 +65,5 @@ train:
 sched:
   warmup_steps: 2000
   min_lr: 0.00001
-  scheduler: cosine
+  scheduler: noam
 

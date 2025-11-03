@@ -180,7 +180,7 @@ def get_loaders_from_ted(
         transcripts_csv: str = None,
         meta_csv: str = None,
         src_field: str = "transcript",
-        tgt_field: str = "title",  # or "description"
+        tgt_field: str = "description",  # or "description"
         max_src_len: int = 2048,
         max_tgt_len: int = 128,
         min_src_chars: int = 64,
@@ -192,9 +192,9 @@ def get_loaders_from_ted(
         test_frac: float = 0.02,
         bos: int = BOS, eos: int = EOS, pad: int = PAD
 ):
-    # trans_df, main_df = _load_ted_frames(zip_path=zip_path, transcripts_csv=transcripts_csv, meta_csv=meta_csv)
-    # df = _merge_ted(trans_df, main_df)
-    df = pd.read_csv(meta_csv)
+    trans_df, main_df = _load_ted_frames(zip_path=zip_path, transcripts_csv=transcripts_csv, meta_csv=meta_csv)
+    df = _merge_ted(trans_df, main_df)
+    # df = pd.read_csv(meta_csv)
     sp = spm.SentencePieceProcessor()
     sp.load(spm_model_path)
     print(f"Loaded SentencePiece model from {spm_model_path} with vocab size {sp.vocab_size()}")
@@ -204,8 +204,8 @@ def get_loaders_from_ted(
     assert sp.eos_id() == eos, "EOS ID mismatch"
     assert sp.pad_id() == pad, "PAD ID mismatch"
     # rows of dicts
-    src_field = "description"
-    tgt_field = "title"
+    # src_field = "description"
+    # tgt_field = "title"
 
     # 清洗数据
     df[src_field] = df[src_field].apply(clean_text)
@@ -214,7 +214,8 @@ def get_loaders_from_ted(
     # 移除清洗后为空的行
     df = df[df[src_field].str.len() > 0]
     df = df[df[tgt_field].str.len() > 0]
-
+    df = df[df[src_field].str.len() >= min_src_chars]
+    df = df[[src_field, tgt_field]].dropna()
     rows = df.to_dict(orient="records")
     ds = TEDSeq2SeqDataset(rows, sp, src_field=src_field, tgt_field=tgt_field, max_src_len=max_src_len,
                            max_tgt_len=max_tgt_len, min_src_chars=min_src_chars)

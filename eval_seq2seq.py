@@ -54,9 +54,11 @@ def beam_search(model, src, src_kpm, bos, eos, pad, max_new_tokens, beam_size, d
                     continue
 
                 # 解码
-                logits = model.decode(encoder_out, seq, None, None, None)
+                logits = model.decode(encoder_out, seq, None, None)
                 logp = F.log_softmax(logits[:, -1, :], dim=-1)  # 只看最后一个 token 的 log probabilities
-
+                logp[:, pad] = -float("inf")
+                if seq.size(1) > 1:
+                    logp[:, bos] = -float("inf")
                 # 获取 top-k 候选项
                 topk = torch.topk(logp, beam_size, dim=-1)
 
@@ -105,7 +107,7 @@ def eval_split(model, cfg, split, decode, max_new_tokens=64, beam_size=4, device
         transcripts_csv=cfg["data"].get("transcripts_csv", None),
         meta_csv=cfg["data"].get("meta_csv", None),
         src_field=cfg["data"].get("src_field", "transcript"),
-        tgt_field=cfg["data"].get("tgt_field", "title"),
+        tgt_field=cfg["data"].get("tgt_field", "description"),
         max_src_len=cfg["data"]["max_src_len"],
         max_tgt_len=cfg["data"]["max_tgt_len"],
         batch_size=cfg["data"]["batch_size"],

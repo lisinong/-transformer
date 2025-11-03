@@ -101,10 +101,10 @@ fi
 
 # Common knobs
 OPT="adamw"
-LR="0.00001"
+LR="0.0005"
 B1="0.9"
 B2="0.98"
-SCH="cosine"
+SCH="noam"
 ACC="1"
 
 # Define the 6 runs
