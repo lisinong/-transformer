@@ -1,4 +1,4 @@
-run_name: exp_seq2seq
+run_name: exp_seq2seq2
 seed: 42
 device: auto
 data:
@@ -6,39 +6,64 @@ data:
 # zip_path: data/TED_Talks.zip
 
   # Option B: or give paths to csv files (if you extract them):
+  spm_model_path: data/spm_ted.model
   transcripts_csv: data/transcripts.csv
   meta_csv: data/ted_main.csv
 
   src_field: transcript    # input
   tgt_field: title         # output; you can switch to 'description'
-  min_src_chars: 64
-  max_src_len: 2048
+  min_src_chars: 64      # filter too short samples
+  max_src_len: 1024
   max_tgt_len: 128
-  batch_size: 8            # transcripts are long
-  num_workers: 0
+  batch_size: 128            # transcripts are long
+  num_workers: 8
   # Splits (sum to 1.0)
-  train_frac: 0.96
-  valid_frac: 0.02
-  test_frac:  0.02
+  train_frac: 0.8
+  valid_frac: 0.12
+  test_frac:  0.08
+  bos: 256
+  eos: 257
+  pad: 258
+
 model:
-  vocab_size: 260          # byte-level 0..255 plus a couple of specials is safe; > 256
-  d_model: 512
-  n_heads: 8
-  d_ff: 2048
-  n_layers: 6
-  dropout: 0.1
+  vocab_size: 8000
+  d_model: 128
+  n_heads: 2
+  d_ff: 512
+  n_layers: 4
+  dropout: 0.3
   use_bias: true
+
+  # ===== Ablation 开关 =====
+  positional_encoding: sinusoidal   # sinusoidal | learned | none
+  max_seq_len: 4096
+  tie_weights: true                 # 可选：嵌入与 lm_head 共享
+  label_smoothing: 0.1              # 做消融时改 0.1
+
 optim:
-  lr: 0.0003
+  name: adamw        # adamw | adam | sgd | rmsprop | adagrad
+  lr: 0.00001
   weight_decay: 0.01
-  betas: [0.9, 0.98]
+  betas: [0.9, 0.98] # 仅 adam/adamw 用
+  momentum: 0.9      # 仅 sgd/rmsprop 用
+  alpha: 0.99        # 仅 rmsprop 用
+  eps: 0.00000001
+
+
 train:
-  max_steps: 20000
-  log_every: 100
-  eval_every: 1000
-  ckpt_dir: runs
-  grad_clip: 1.0
+  # 【新】使用 num_epochs 来控制训练长度
+  num_epochs: 200 # 根据你的需求设置，对于小数据集，200-300是个不错的起点
+
+  ckpt_dir: "./runs"
   amp: true
+  grad_clip: 1.0
+  accum_steps: 2
+
+
+  # 【新】设置每隔多少个epoch保存一次快照
+  save_every_epochs: 20
 sched:
   warmup_steps: 2000
-  min_lr: 0.00003
+  min_lr: 0.00001
+  scheduler: cosine
+

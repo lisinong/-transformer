@@ -1,11 +1,64 @@
-\
 import torch
 import torch.nn as nn
 from .modules import MultiHeadAttention, PositionwiseFFN, ResidualLayerNorm, PositionalEncoding
+import math
+import torch.nn.functional as F
 
 BOS = 256
 EOS = 257
 PAD = 258
+
+
+# ===== 新增：位置编码工厂 =====
+
+
+class SinusoidalPE(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 4096):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position.float() * div_term)
+        pe[:, 1::2] = torch.cos(position.float() * div_term)
+        self.register_buffer("pe", pe, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, T, D)
+        T = x.size(1)
+        return x + self.pe[:T].unsqueeze(0)
+
+
+class LearnedPE(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 4096):
+        super().__init__()
+        self.emb = nn.Embedding(max_len, d_model)
+
+    def forward(self, x: torch.Tensor):
+        T = x.size(1)
+        pos = torch.arange(T, device=x.device).unsqueeze(0).expand(x.size(0), T)
+        return x + self.emb(pos)
+
+
+class NoPE(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 4096):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor):
+        return x
+
+
+def build_positional_encoding(kind: str, d_model: int, max_len: int):
+    kind = (kind or "sinusoidal").lower()
+    if kind == "sinusoidal":
+        return SinusoidalPE(d_model, max_len)
+    if kind == "learned":
+        return LearnedPE(d_model, max_len)
+    if kind == "none":
+        return NoPE(d_model, max_len)
+    raise ValueError(f"Unknown positional_encoding: {kind}")
+
 
 class EncoderLayer(nn.Module):
     def __init__(self, d_model, n_heads, d_ff, dropout=0.0, use_bias=True):
@@ -22,6 +75,7 @@ class EncoderLayer(nn.Module):
         x = self.res_attn(x, lambda z: self.self_attn(z, z, z, attn_mask=attn_mask)[0])
         x = self.res_ffn(x, self.ffn)
         return x
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, n_heads, d_ff, dropout=0.0, use_bias=True):
@@ -50,33 +104,139 @@ class DecoderLayer(nn.Module):
         x = self.res_ffn(x, self.ffn)
         return x
 
+
 class TransformerSeq2Seq(nn.Module):
-    def __init__(self, vocab_size=259, d_model=256, n_heads=4, d_ff=1024, n_layers=4, dropout=0.1, use_bias=True, max_len=10000):
+    def __init__(self, vocab_size=259, d_model=256, n_heads=4, d_ff=1024, n_layers=4, dropout=0.1, use_bias=True,
+                 positional_encoding: str = "sinusoidal",
+                 max_seq_len=10000, tie_weights=False):
         super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.dropout_p = float(dropout)
         self.token_emb = nn.Embedding(vocab_size, d_model, padding_idx=PAD)
-        self.pos_enc = PositionalEncoding(d_model, max_len=max_len)
-        self.enc_layers = nn.ModuleList([EncoderLayer(d_model, n_heads, d_ff, dropout=dropout, use_bias=use_bias) for _ in range(n_layers)])
-        self.dec_layers = nn.ModuleList([DecoderLayer(d_model, n_heads, d_ff, dropout=dropout, use_bias=use_bias) for _ in range(n_layers)])
+        # self.pos_enc = PositionalEncoding(d_model, max_len=max_len)
+        # 位置编码（可切换）
+        self.pos_enc = build_positional_encoding(positional_encoding, d_model, max_seq_len)
+        self.enc_layers = nn.ModuleList(
+            [EncoderLayer(d_model, n_heads, d_ff, dropout=dropout, use_bias=use_bias) for _ in range(n_layers)])
+        self.dec_layers = nn.ModuleList(
+            [DecoderLayer(d_model, n_heads, d_ff, dropout=dropout, use_bias=use_bias) for _ in range(n_layers)])
         self.enc_ln = nn.LayerNorm(d_model)
         self.dec_ln = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        if tie_weights:
+            self.lm_head.weight = self.token_emb.weight  # 权重共享（可选）
 
     def _causal_mask(self, T, device):
         import torch
         return torch.triu(torch.ones(T, T, dtype=torch.bool, device=device), diagonal=1)[None, None, :, :]
 
-    def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
-        device = src.device
-        # encoder
-        enc = self.token_emb(src); enc = self.pos_enc(enc)
+    def encode(self, src_ids, src_key_padding_mask=None):
+        """
+        对源序列进行编码。
+        """
+        # ---- Embedding & Positional Encoding ----
+        src = self.token_emb(src_ids) * (self.d_model ** 0.5)
+        src = self.pos_enc(src)
+        src = nn.Dropout(self.dropout_p)(src)
+
+        # ---- Encoder ----
+        enc = src
         for layer in self.enc_layers:
             enc = layer(enc, src_key_padding_mask=src_key_padding_mask)
-        mem = self.enc_ln(enc)
-        # decoder
-        dec = self.token_emb(tgt); dec = self.pos_enc(dec)
-        tgt_mask = self._causal_mask(dec.size(1), device)
+        mem = self.enc_ln(enc)  # Encoder 的最终输出
+        return mem
+
+    # --- 【新增】: decode 方法 ---
+    def decode(self, memory, tgt_ids, mem_key_padding_mask=None, tgt_key_padding_mask=None, tgt_is_causal=True):
+        """
+        对目标序列进行解码，使用编码器的输出 `memory`。
+        """
+        # ---- Embedding & Positional Encoding ----
+        tgt = self.token_emb(tgt_ids) * (self.d_model ** 0.5)
+        tgt = self.pos_enc(tgt)
+        tgt = nn.Dropout(self.dropout_p)(tgt)
+
+        # ---- Decoder ----
+        tgt_mask = self._causal_mask(tgt.size(1), tgt.device) if tgt_is_causal else None
+        dec = tgt
         for layer in self.dec_layers:
-            dec = layer(dec, mem, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask, mem_key_padding_mask=src_key_padding_mask)
+            dec = layer(
+                dec,
+                memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                mem_key_padding_mask=mem_key_padding_mask,
+            )
         dec = self.dec_ln(dec)
+
+        # ---- LM Head ----
         logits = self.lm_head(dec)
         return logits
+
+        # --- 【修改】: forward 方法现在调用 encode 和 decode ---
+
+    def forward(self, src_ids, tgt_ids, src_key_padding_mask=None, tgt_key_padding_mask=None):
+        """
+        完整的 Teacher-Forcing 前向传播。
+        """
+        memory = self.encode(src_ids, src_key_padding_mask)
+        logits = self.decode(memory, tgt_ids, mem_key_padding_mask=src_key_padding_mask,
+                             tgt_key_padding_mask=tgt_key_padding_mask)
+        return logits
+
+    @torch.no_grad()  # 确保在生成时不计算梯度
+    def generate(self, src, src_key_padding_mask, max_new_tokens, bos, eos, pad):
+        """
+        实现贪心解码 (Greedy Decoding) 的方法。
+
+        Args:
+            src (torch.Tensor): 源序列，形状为 [N, S_len]
+            src_key_padding_mask (torch.Tensor): 源序列的padding mask，形状为 [N, S_len]
+            max_new_tokens (int): 最大生成 token 数量
+            bos (int): 开始符 (BOS) 的 ID
+            eos (int): 结束符 (EOS) 的 ID
+            pad (int): 填充符 (PAD) 的 ID
+
+        Returns:
+            torch.Tensor: 生成的序列，形状为 [N, T_len]
+        """
+        device = src.device
+        batch_size = src.size(0)
+
+        # 1. 对输入进行编码，这个操作只需要一次
+        encoder_output = self.encode(src, src_key_padding_mask)
+
+        # 2. 初始化解码器的输入，所有序列都以 BOS 开始
+        # 形状为 [N, 1]
+        tgt = torch.full((batch_size, 1), bos, dtype=torch.long, device=device)
+
+        # 3. 用于跟踪哪些序列已经生成了 EOS
+        # 初始时，所有序列都未完成
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        # 4. 自回归生成循环
+        for _ in range(max_new_tokens):
+            # 解码一步
+            logits = self.decode(encoder_output, tgt, src_key_padding_mask, None, None)
+
+            # 只取最后一个时间步的 logits 进行预测
+            # 形状为 [N, vocab_size]
+            next_token_logits = logits[:, -1, :]
+
+            # 5. 贪心策略：选择概率最高的 token
+            # 形状为 [N, 1]
+            next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(1)
+
+            # 6. 将新生成的 token 拼接到现有序列后面
+            tgt = torch.cat([tgt, next_token], dim=1)
+
+            # 7. 更新已完成的序列状态
+            # 如果新生成的 token 是 EOS，则将对应序列标记为完成
+            finished = finished | (next_token.squeeze() == eos)
+
+            # 8. 如果一个批次中的所有序列都已完成，则提前退出循环
+            if finished.all():
+                break
+
+        return tgt

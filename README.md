@@ -17,8 +17,8 @@ conda activate transformer
 # 安装依赖
 pip install -r requirements.txt
 
-# 训练（使用 configs/base.yaml）
-python train_seq2seq.py --config configs/base.yaml
+# 训练（使用 configs/baseseq2seq.yaml）
+python train_seq2seq.py --config configs/baseseq2seq.yaml
 ```
 
 训练完成后，产物会保存到 `runs/<run_name>/`：
@@ -30,7 +30,11 @@ python train_seq2seq.py --config configs/base.yaml
 
 ```bash
 # 在验证集上评估，并示例生成文本
-python eval_seq2seq.py --ckpt runs/exp1/model.pt --prompt "The meaning of life " --steps 200
+python eval_seq2seq.py --config configs/base_seq2seq.yaml \
+  --ckpt runs/exp_seq2seq2/model.pt \
+  --src "Over the last decade, AI has transformed the way we..." \
+  --decode greedy --max_new_tokens 32
+python eval_seq2seq.py --ckpt runs/exp_seq2seq2/model.pt  --split valid  --max_new_tokens 64
 ```
 
 ## 文件说明

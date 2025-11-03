@@ -3,11 +3,14 @@ import zipfile
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
+import sentencepiece as spm
 
 # Special tokens
-BOS = 1
-EOS = 2
-PAD = 0
+BOS = 256
+EOS = 257
+PAD = 258
+import re
+import html
 
 
 def _read_csv_from_zip(zip_path: str, inner_name: str) -> pd.DataFrame:
@@ -16,8 +19,51 @@ def _read_csv_from_zip(zip_path: str, inner_name: str) -> pd.DataFrame:
             return pd.read_csv(f)
 
 
+def clean_text(text):
+    """
+    一个更强力的文本清洗函数，专门针对你数据中的问题。
+    """
+    if not isinstance(text, str):
+        return ""
+
+    # 1. 解码HTML实体
+    text = html.unescape(text)
+
+    # 2. 移除括号内的内容，例如 (Laughter), (Applause)
+    # 这个正则表达式会匹配括号和括号内的所有内容
+    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)
+
+    # 3. 转换为小写
+    text = text.lower()
+
+    # 4. 移除网址
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+
+    # 5. 只保留英文字母和基本标点符号，移除数字和其它符号
+    # 保留了句号、问号、感叹号、逗号、撇号
+    text = re.sub(r'[^a-z\s.,?!\']', '', text)
+
+    # 6. 将多个空格合并为一个
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
+
+
 def _read_csv(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
+
+
+def _clip_and_pack(ids, max_len, bos=None, eos=None, add_bos=True, add_eos=True):
+    # bos 和 eos 的 ID 现在由 SentencePiece 模型处理，这里可以简化
+    # 但为了兼容你之前的代码，我们保留 add_bos/add_eos 逻辑
+    ids = list(map(int, ids))
+    seq = []
+    if add_bos and bos is not None: seq.append(bos)
+    limit = max_len - (1 if add_bos and bos is not None else 0) - (1 if add_eos and eos is not None else 0)
+    if limit > 0:
+        seq.extend(ids[:limit])
+    if add_eos and eos is not None: seq.append(eos)
+    return seq
 
 
 def _load_ted_frames(zip_path: str = None, transcripts_csv: str = None, meta_csv: str = None):
@@ -75,28 +121,14 @@ def _merge_ted(trans_df: pd.DataFrame, main_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _maybe_to_ids(text: str):
-    if not isinstance(text, str):
-        text = str(text) if text is not None else ""
-    # byte-level ids
-    return list(text.encode("utf-8", errors="ignore"))
-
-
-def _clip_and_pack(ids, max_len, bos=BOS, eos=EOS, add_bos=True, add_eos=True):
-    ids = list(map(int, ids))
-    seq = []
-    if add_bos: seq.append(bos)
-    limit = max_len - (1 if add_bos else 0) - (1 if add_eos else 0)
-    if limit > 0:
-        seq.extend(ids[:limit])
-    if add_eos: seq.append(eos)
-    return seq
-
-
 class TEDSeq2SeqDataset(Dataset):
-    def __init__(self, rows, src_field="transcript", tgt_field="title", max_src_len=2048, max_tgt_len=128,
-                 min_src_chars=64, bos=BOS, eos=EOS, pad=PAD):
+    def __init__(self, rows, spm_processor, src_field="transcript", tgt_field="title", max_src_len=2048,
+                 max_tgt_len=128, min_src_chars=64):
+        self.sp = spm_processor  # 保存 SentencePiece 处理器
         self.rows = []
+        self.bos_id = self.sp.bos_id()
+        self.eos_id = self.sp.eos_id()
+        self.pad_id = self.sp.pad_id()
         for r in rows:
             s = r.get(src_field, "")
             t = r.get(tgt_field, "")
@@ -105,21 +137,23 @@ class TEDSeq2SeqDataset(Dataset):
                 t = "" if t is None else str(t)
             if len(s.strip()) < min_src_chars:  # filter too-short transcripts
                 continue
-            self.rows.append({src_field: s, tgt_field: t})
+            self.rows.append({src_field: s.strip(), tgt_field: t.strip()})  # 增加strip()
+
         self.src_field, self.tgt_field = src_field, tgt_field
         self.max_src_len, self.max_tgt_len = max_src_len, max_tgt_len
-        self.bos, self.eos, self.pad = bos, eos, pad
 
     def __len__(self):
         return len(self.rows)
 
     def __getitem__(self, idx):
         r = self.rows[idx]
-        s_ids = _maybe_to_ids(r[self.src_field])
-        t_ids = _maybe_to_ids(r[self.tgt_field])
-        src = _clip_and_pack(s_ids, self.max_src_len, self.bos, self.eos, True, True)
-        tgt_inp = _clip_and_pack(t_ids, self.max_tgt_len, self.bos, self.eos, True, False)
-        tgt_out = _clip_and_pack(t_ids, self.max_tgt_len, self.bos, self.eos, False, True)
+        s_ids = self.sp.encode_as_ids(r[self.src_field])
+        t_ids = self.sp.encode_as_ids(r[self.tgt_field])
+
+        # _clip_and_pack 现在处理的是 subword ID，而不是 byte ID
+        src = _clip_and_pack(s_ids, self.max_src_len, self.bos_id, self.eos_id, True, True)
+        tgt_inp = _clip_and_pack(t_ids, self.max_tgt_len, self.bos_id, None, True, False)  # 注意: tgt_inp 不加 EOS
+        tgt_out = _clip_and_pack(t_ids, self.max_tgt_len, None, self.eos_id, False, True)  # 注意: tgt_out 不加 BOS
         return torch.tensor(src, dtype=torch.long), torch.tensor(tgt_inp, dtype=torch.long), torch.tensor(tgt_out,
                                                                                                           dtype=torch.long)
 
@@ -141,6 +175,7 @@ def ted_collate(batch, pad_id=PAD):
 
 
 def get_loaders_from_ted(
+        spm_model_path: str,
         zip_path: str = None,
         transcripts_csv: str = None,
         meta_csv: str = None,
@@ -155,13 +190,33 @@ def get_loaders_from_ted(
         train_frac: float = 0.96,
         valid_frac: float = 0.02,
         test_frac: float = 0.02,
+        bos: int = BOS, eos: int = EOS, pad: int = PAD
 ):
-    trans_df, main_df = _load_ted_frames(zip_path=zip_path, transcripts_csv=transcripts_csv, meta_csv=meta_csv)
-    df = _merge_ted(trans_df, main_df)
+    # trans_df, main_df = _load_ted_frames(zip_path=zip_path, transcripts_csv=transcripts_csv, meta_csv=meta_csv)
+    # df = _merge_ted(trans_df, main_df)
+    df = pd.read_csv(meta_csv)
+    sp = spm.SentencePieceProcessor()
+    sp.load(spm_model_path)
+    print(f"Loaded SentencePiece model from {spm_model_path} with vocab size {sp.vocab_size()}")
 
+    # 确认ID匹配
+    assert sp.bos_id() == bos, "BOS ID mismatch"
+    assert sp.eos_id() == eos, "EOS ID mismatch"
+    assert sp.pad_id() == pad, "PAD ID mismatch"
     # rows of dicts
+    src_field = "description"
+    tgt_field = "title"
+
+    # 清洗数据
+    df[src_field] = df[src_field].apply(clean_text)
+    df[tgt_field] = df[tgt_field].apply(clean_text)
+
+    # 移除清洗后为空的行
+    df = df[df[src_field].str.len() > 0]
+    df = df[df[tgt_field].str.len() > 0]
+
     rows = df.to_dict(orient="records")
-    ds = TEDSeq2SeqDataset(rows, src_field=src_field, tgt_field=tgt_field, max_src_len=max_src_len,
+    ds = TEDSeq2SeqDataset(rows, sp, src_field=src_field, tgt_field=tgt_field, max_src_len=max_src_len,
                            max_tgt_len=max_tgt_len, min_src_chars=min_src_chars)
 
     # split
@@ -172,11 +227,13 @@ def get_loaders_from_ted(
     g = torch.Generator().manual_seed(seed)
     tr, va, te = random_split(ds, [n_train, n_valid, n_test], generator=g)
 
+    pad_id_from_spm = sp.pad_id()
     tr_loader = DataLoader(tr, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-                           collate_fn=lambda b: ted_collate(b, PAD), drop_last=True)
+                           collate_fn=lambda b: ted_collate(b, pad_id=pad_id_from_spm), drop_last=True)
     va_loader = DataLoader(va, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                           collate_fn=lambda b: ted_collate(b, PAD), drop_last=False)
+                           collate_fn=lambda b: ted_collate(b, pad_id=pad_id_from_spm), drop_last=False)
     te_loader = DataLoader(te, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                           collate_fn=lambda b: ted_collate(b, PAD), drop_last=False)
+                           collate_fn=lambda b: ted_collate(b, pad_id=pad_id_from_spm), drop_last=False)
 
-    return tr_loader, va_loader, te_loader, BOS, EOS, PAD
+    return tr_loader, va_loader, te_loader, sp.bos_id(), sp.eos_id(), sp.pad_id(), sp  # <--- 【新】返回 sp 处理器
+

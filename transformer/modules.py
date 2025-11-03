@@ -92,4 +92,4 @@ class ResidualLayerNorm(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer):
-        return x + self.dropout(sublayer(self.ln(x)))
+        return self.ln(x + self.dropout(sublayer(x)))
