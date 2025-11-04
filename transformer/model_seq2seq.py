@@ -214,11 +214,13 @@ class TransformerSeq2Seq(nn.Module):
         # 3. 用于跟踪哪些序列已经生成了 EOS
         # 初始时，所有序列都未完成
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-
+        min_len = 5
+        no_repeat_ngram_size = 3  # ★ 关键：不允许重复 3-gram
+        repetition_penalty = 1.2  # ★ 关键：已出现过的 token 降权
         # 4. 自回归生成循环
         for _ in range(max_new_tokens):
             # 解码一步
-            logits = self.decode(encoder_output, tgt, src_key_padding_mask, None)
+            logits = self.decode(encoder_output, tgt, src_key_padding_mask, None, True)
 
             # 只取最后一个时间步的 logits 进行预测
             # 形状为 [N, vocab_size]
@@ -227,6 +229,38 @@ class TransformerSeq2Seq(nn.Module):
             # 从第二步开始禁止再次选 BOS（第一步必须是 BOS）
             if tgt.size(1) > 1:
                 next_token_logits[:, bos] = float("-inf")
+            if _ < min_len:
+                next_token_logits[:, eos] = float("-inf")
+            # ★ 关键：不允许重复 n-gram
+            with torch.no_grad():
+                for i in range(batch_size):
+                    if finished[i]:
+                        continue
+                    prev_tokens = tgt[i].tolist()
+                    for tok in set(prev_tokens):
+                        if tok in (bos, eos, pad):
+                            continue
+                        # 将该 token 的logit 降权（等价于概率^1/penalty）
+                        next_token_logits[i, tok] /= repetition_penalty
+            if no_repeat_ngram_size > 0:
+                n = no_repeat_ngram_size
+                with torch.no_grad():
+                    for i in range(batch_size):
+                        if finished[i] or tgt.size(1) < n - 1:
+                            continue
+                        # 构造已经出现过的 n-gram 前缀 -> 后继集合
+                        history = tgt[i].tolist()
+                        banned = set()
+                        # 建表： (w_{t-n+1}, ..., w_{t-1}) -> {w_t}
+                        prefix2next = {}
+                        for j in range(len(history) - n + 1):
+                            prefix = tuple(history[j:j + n - 1])
+                            nxt = history[j + n - 1]
+                            prefix2next.setdefault(prefix, set()).add(nxt)
+                        # 取当前上下文前缀，ban 所有已见过的 next
+                        cur_prefix = tuple(history[-(n - 1):])
+                        for nxt in prefix2next.get(cur_prefix, []):
+                            next_token_logits[i, nxt] = float("-inf")
             # 如能拿到 UNK 的 id（比如 sp.unk_id()），也可以屏蔽：
             # next_token_logits[:, unk] = float("-inf")
             # 5. 贪心策略：选择概率最高的 token

@@ -91,53 +91,77 @@ def save_curve(history, out_png, is_epoch=True):  # <--- 【改动点 1】: 增�
 
 def prepare_tokenizer(cfg):
     """
-    检查分词模型是否存在。如果不存在，则自动训练一个新的。
+    若 spm_model 不存在，则使用 transcript + description + title 共同训练一个新的 SentencePiece 模型。
+    训练语料不做过度清洗，仅做基础空白规范化，避免破坏空格/标点的统计。
     """
+    import os, html, re
+    import pandas as pd
+    import sentencepiece as spm
+
     spm_model_path = cfg["data"]["spm_model_path"]
     spm_vocab_path = spm_model_path.replace(".model", ".vocab")
-
-    # 1. 检查模型文件是否已存在
     if os.path.exists(spm_model_path) and os.path.exists(spm_vocab_path):
         print(f"Tokenizer model found at '{spm_model_path}'. Skipping training.")
         return
 
-    # 2. 如果不存在，则开始训练
-    print(f"Tokenizer model not found. Starting training...")
+    transcripts_csv = cfg["data"].get("transcripts_csv")
+    meta_csv = cfg["data"].get("meta_csv")
+    assert transcripts_csv and meta_csv, "Need both transcripts_csv and meta_csv to build SPM."
 
-    # 2.1 创建临时语料文件
+    print(f"Tokenizer model not found. Starting training...")
     print("  -> Creating corpus file for training...")
-    df = pd.read_csv(cfg["data"]["meta_csv"])
+
+    df_t = pd.read_csv(transcripts_csv)
+    df_m = pd.read_csv(meta_csv)
+
+    def normalize_text(s: str) -> str:
+        if not isinstance(s, str):
+            s = "" if s is None else str(s)
+        s = html.unescape(s)
+        # 只做空白规范化，避免丢空格或标点
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
 
     corpus_path = "temp_corpus_for_spm.txt"
     with open(corpus_path, "w", encoding="utf-8") as f:
-        # 清洗 description 和 title 列后写入语料文件
-        for text in df["description"].dropna():
-            f.write(clean_text(text) + "\n")
-        for text in df["title"].dropna():
-            f.write(clean_text(text) + "\n")
+        # 1) transcripts（长文本是关键）
+        if "transcript" in df_t.columns:
+            for text in df_t["transcript"].dropna():
+                f.write(normalize_text(text) + "\n")
+        # 2) descriptions
+        if "description" in df_m.columns:
+            for text in df_m["description"].dropna():
+                f.write(normalize_text(text) + "\n")
+        # 3) titles
+        if "title" in df_m.columns:
+            for text in df_m["title"].dropna():
+                f.write(normalize_text(text) + "\n")
 
-    # 2.2 定义训练参数
-    # 从配置中获取参数，提供合理的默认值
+    # 训练参数
     vocab_size = cfg["model"].get("vocab_size", 8000)
     bos_id = cfg["data"].get("bos", 256)
     eos_id = cfg["data"].get("eos", 257)
-    pad_id = cfg["data"].get("pad", PAD)  # 从 data 模块导入 PAD
+    pad_id = cfg["data"].get("pad", 258)
     model_prefix = spm_model_path.replace(".model", "")
 
+    # 建议使用 unigram + 高覆盖率；UNK 用默认 0（不要设成 3）
     spm_command = (
-        f'--input={corpus_path} --model_prefix={model_prefix} '
-        f'--vocab_size={vocab_size} --model_type=bpe --character_coverage=1.0 '
-        f'--bos_id={bos_id} --eos_id={eos_id} --pad_id={pad_id} --unk_id=3'
+        f'--input={corpus_path} '
+        f'--model_prefix={model_prefix} '
+        f'--model_type=unigram '
+        f'--vocab_size={vocab_size} '
+        f'--character_coverage=0.9995 '
+        f'--shuffle_input_sentence=true '
+        f'--input_sentence_size=1000000 '
+        f'--bos_id={bos_id} --eos_id={eos_id} --pad_id={pad_id} --unk_id=0'
     )
 
-    # 2.3 执行训练
     print("  -> Training SentencePiece model...")
     spm.SentencePieceTrainer.train(spm_command)
-
-    # 2.4 清理临时文件
     os.remove(corpus_path)
     print(f"Tokenizer model trained and saved as '{spm_model_path}' and '{spm_vocab_path}'.")
     print("-" * 50)
+
 
 
 def train(cfg):

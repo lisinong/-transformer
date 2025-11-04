@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from rouge_score import rouge_scorer, scoring
 import sentencepiece as spm
-
+import math
 # 确保从你修改后的 data.py 和 model_seq2seq.py 导入
 from transformer.data import get_loaders_from_ted, PAD
 from transformer.model_seq2seq import TransformerSeq2Seq
@@ -20,68 +20,106 @@ def resolve_device(pref: str):
         return torch.device("cpu")
     return torch.device(pref)
 
+# === NEW: safe detokenize utilities ===
+# === safe detokenize ===
+def ids_to_text(sp, ids, bos, eos, pad):
+    arr = [int(x) for x in ids]
+    # 去 PAD
+    arr = [x for x in arr if x != pad]
+    # 去头部 BOS
+    if arr and arr[0] == bos:
+        arr = arr[1:]
+    # 截断到 EOS
+    if eos in arr:
+        arr = arr[:arr.index(eos)]
+    # 只用 SentencePiece 原生解码；不要做任何 replace / lower / 正则
+    return sp.decode_ids(arr)
+
+def batch_ids_to_text(sp, ids_batch, bos, eos, pad):
+    return [ids_to_text(sp, row, bos, eos, pad) for row in ids_batch]
+
 
 def beam_search(model, src, src_kpm, bos, eos, pad, max_new_tokens, beam_size, device="cpu", lp_alpha=0.6):
     """
-    为单个样本执行 Beam Search。
-    注意：此实现仅支持 batch_size=1 的输入。
+    为单个样本执行 Beam Search。仅支持 batch_size=1。
     """
     assert src.size(0) == 1, "Beam search implementation only supports batch_size=1"
+    min_len = 5
+    no_repeat_ngram_size = 3
+    repetition_penalty = 1.2
+    log_pen = math.log(repetition_penalty)
 
-    beams = [(torch.tensor([[bos]], dtype=torch.long, device=device), 0.0)]  # (sequence, log_probability_score)
-
+    beams = [(torch.tensor([[bos]], dtype=torch.long, device=device), 0.0)]  # (sequence, logprob)
     with torch.no_grad():
         encoder_out = model.encode(src, src_key_padding_mask=src_kpm)
 
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             new_beams = []
 
-            # 检查是否有 beam 已经生成了 EOS
-            has_ended_beams = False
-            for seq, score in beams:
-                if seq[0, -1].item() == eos:
-                    # 这个 beam 已经完成，直接加入下一轮候选，不再扩展
-                    new_beams.append((seq, score))
-                    has_ended_beams = True
+            # 先把已经到 EOS 的 beam 原样带入（不再扩展）
+            ended = [(seq, score) for (seq, score) in beams if seq[0, -1].item() == eos]
+            alive  = [(seq, score) for (seq, score) in beams if seq[0, -1].item() != eos]
+            new_beams.extend(ended)
 
-            if has_ended_beams and len(new_beams) == beam_size:
-                # 如果所有的 beam 都已结束，提前终止
-                if all(b[0][0, -1].item() == eos for b in new_beams):
-                    break
+            # 若全结束就提前退出
+            if len(alive) == 0:
+                beams = new_beams[:beam_size]
+                break
 
-            for seq, score in beams:
-                if seq[0, -1].item() == eos:
-                    continue
+            for seq, score in alive:
+                # 解码一步（确保因果掩码）
+                logits = model.decode(encoder_out, seq, None, None, True)
+                logp = F.log_softmax(logits[:, -1, :], dim=-1)
 
-                # 解码
-                logits = model.decode(encoder_out, seq, None, None)
-                logp = F.log_softmax(logits[:, -1, :], dim=-1)  # 只看最后一个 token 的 log probabilities
+                # 基础屏蔽
                 logp[:, pad] = -float("inf")
-                if seq.size(1) > 1:
+                if seq.size(1) > 1:  # 除首 token 外禁止 BOS
                     logp[:, bos] = -float("inf")
-                # 获取 top-k 候选项
+                if step < min_len:    # 最小生成长度前禁止 EOS
+                    logp[:, eos] = -float("inf")
+
+                # 相邻重复禁：禁止上一个 token 再出现
+                last_id = seq[0, -1].item()
+                logp[0, last_id] = -float("inf")
+
+                # repetition penalty：对已出现过的 token 统一降权
+                prev_tokens = set(seq[0].tolist())
+                for t in prev_tokens:
+                    if t not in (bos, eos, pad):
+                        logp[0, t] = logp[0, t] - log_pen
+
+                # no-repeat n-gram
+                if no_repeat_ngram_size > 0 and seq.size(1) >= no_repeat_ngram_size - 1:
+                    n = no_repeat_ngram_size
+                    hist = seq[0].tolist()
+                    prefix2next = {}
+                    for j in range(len(hist) - n + 1):
+                        pre = tuple(hist[j:j+n-1])
+                        nxt = hist[j+n-1]
+                        prefix2next.setdefault(pre, set()).add(nxt)
+                    cur_pre = tuple(hist[-(n-1):])
+                    for banned in prefix2next.get(cur_pre, []):
+                        logp[0, banned] = -float("inf")
+
+                # 取 top-k
                 topk = torch.topk(logp, beam_size, dim=-1)
-
                 for k in range(beam_size):
-                    next_token_id = topk.indices[0, k].view(1, 1)
-                    next_token_logp = float(topk.values[0, k])
-
-                    new_seq = torch.cat([seq, next_token_id], dim=1)
-                    new_score = score + next_token_logp
+                    next_id = topk.indices[0, k].view(1, 1)
+                    new_seq = torch.cat([seq, next_id], dim=1)
+                    new_score = score + float(topk.values[0, k])
                     new_beams.append((new_seq, new_score))
 
-            # 根据分数排序并剪枝
+            # 剪枝
             new_beams.sort(key=lambda x: x[1], reverse=True)
             beams = new_beams[:beam_size]
 
-            # 检查是否所有 beam 都已结束
+            # 全部到 EOS 也可退出
             if all(b[0][0, -1].item() == eos for b in beams):
                 break
 
-    # 长度惩罚并选择最佳 beam
-    # (score / length^alpha)
-    best_beam = max(beams, key=lambda x: x[1] / ((5 + x[0].size(1)) / 6) ** lp_alpha)
-    return best_beam[0]  # 只返回最佳序列
+    # 长度惩罚选最优
+    best = max(beams, key=lambda x: x[1] / ((5 + x[0].size(1)) / 6) ** lp_alpha)
+    return best[0]
 
 
 def eval_split(model, cfg, split, decode, max_new_tokens=64, beam_size=4, device="cpu"):
@@ -148,11 +186,17 @@ def eval_split(model, cfg, split, decode, max_new_tokens=64, beam_size=4, device
             raise ValueError(f"Unknown decode method: {decode}")
 
         # --- 3. 使用 SentencePiece 正确解码为文本 ---
-        hyps_text = sp.decode(ys.tolist())
-        refs_text = sp.decode(tout.tolist())
-
+        # hyps_text = sp.decode(ys.tolist())
+        # refs_text = sp.decode(tout.tolist())
+        hyps_text = batch_ids_to_text(sp, ys.tolist(), bos, eos, pad)
+        refs_text = batch_ids_to_text(sp, tout.tolist(), bos, eos, pad)
         all_hyps.extend(hyps_text)
         all_refs.extend(refs_text)
+        # # 仅调试用：检查是否仍然存在可疑的 ".s" 或 ",s" 模式
+        # if any((".s" in x or ",s" in x) for x in hyps_text[:10]):
+        #     raise RuntimeError("Detected suspicious '.s' / ',s' in hypothesis text. "
+        #                "Make sure you are using ids_to_text(sp, ids, bos, eos, pad) "
+        #                "and NOT doing any piece-level replace or lower().")
 
         # --- 调试输出 ---
         # 仅在非 tqdm 环境或需要详细日志时打开

@@ -12,6 +12,18 @@ PAD = 258
 import re
 import html
 
+import html, re
+
+def clean_text_light(text):
+    """适用于 SentencePiece 训练的轻量清洗：保留空格和标点"""
+    if not isinstance(text, str):
+        return ""
+    text = html.unescape(text)
+    # 去掉明显噪声标签
+    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)      # 移除 (Laughter) (Applause)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text) # 去网址
+    text = re.sub(r'\s+', ' ', text).strip()          # 规范空白
+    return text
 
 def _read_csv_from_zip(zip_path: str, inner_name: str) -> pd.DataFrame:
     with zipfile.ZipFile(zip_path, "r") as z:
@@ -208,8 +220,8 @@ def get_loaders_from_ted(
     # tgt_field = "title"
 
     # 清洗数据
-    df[src_field] = df[src_field].apply(clean_text)
-    df[tgt_field] = df[tgt_field].apply(clean_text)
+    df[src_field] = df[src_field].apply(clean_text_light)
+    df[tgt_field] = df[tgt_field].apply(clean_text_light)
 
     # 移除清洗后为空的行
     df = df[df[src_field].str.len() > 0]
