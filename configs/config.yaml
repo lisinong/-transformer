@@ -1,0 +1,51 @@
+data:
+  train_path: "dataset/AA"   # 训练目录（也可以用整个 ./data/wiki_zh）
+  val_path:   "dataset/AB"   # 验证目录
+  test_path:  "dataset/AC"   # 测试目录
+  file_globs: ["**/wiki_*"]         # 递归匹配任意子目录下的 wiki_* 文件
+  task: "title2text"
+  max_src_len: 256
+  max_tgt_len: 64
+  batch_size: 512
+  eval_batch_size: 512
+  num_workers: 16
+  drop_last: false
+  pad_id: 256
+  bos_id: 257
+  eos_id: 258
+  tokenizer:
+    type: spm
+    spm_model: ./spm/spm.model
+    spm_vocab_size: 8000
+    spm_sample_size: 200000   # 可选：只采样 N 行语料以加快训练；0 或不填=全量
+    add_bos: true
+    add_eos: true
+
+model:
+  d_model: 256
+  n_heads: 4
+  d_ff: 1024
+  n_layers: 4
+  dropout: 0.1
+  use_bias: true
+  positional_encoding: "sinusoidal"
+  tie_weights: false
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 0.002
+  lr_decay_factor: 0.5
+  lr_patience: 2
+
+training:
+  output_dir: "./results"
+  epochs: 150
+  log_interval: 50
+  max_grad_norm: 1.0
+  save_every_epoch: false
+  seed: 42
+  early_stop_patience: 5
+
+testing:
+  num_batches_to_generate: 2
+  max_new_tokens: 64

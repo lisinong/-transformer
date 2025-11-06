@@ -14,16 +14,18 @@ import html
 
 import html, re
 
+
 def clean_text_light(text):
     """适用于 SentencePiece 训练的轻量清洗：保留空格和标点"""
     if not isinstance(text, str):
         return ""
     text = html.unescape(text)
     # 去掉明显噪声标签
-    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)      # 移除 (Laughter) (Applause)
-    text = re.sub(r'https?://\S+|www\.\S+', '', text) # 去网址
-    text = re.sub(r'\s+', ' ', text).strip()          # 规范空白
+    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)  # 移除 (Laughter) (Applause)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)  # 去网址
+    text = re.sub(r'\s+', ' ', text).strip()  # 规范空白
     return text
+
 
 def _read_csv_from_zip(zip_path: str, inner_name: str) -> pd.DataFrame:
     with zipfile.ZipFile(zip_path, "r") as z:
@@ -249,4 +251,3 @@ def get_loaders_from_ted(
                            collate_fn=lambda b: ted_collate(b, pad_id=pad_id_from_spm), drop_last=False)
 
     return tr_loader, va_loader, te_loader, sp.bos_id(), sp.eos_id(), sp.pad_id(), sp  # <--- 【新】返回 sp 处理器
-

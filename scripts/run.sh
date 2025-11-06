@@ -1,171 +1,150 @@
 #!/usr/bin/env bash
-# run_min_ablation.sh
-# Minimal ablation on your TransformerSeq2Seq: 6 runs.
+# run_ablation.sh
+set -u
+set -o pipefail
 
-set -euo pipefail
+BASE_CFG="${1:-configs/config.yaml}"
+TS=$(date +%Y%m%d_%H%M%S)
 
-BASE_CFG="configs/base_seq2seq.yaml"
-RESULTS_TSV="ablation_results.tsv"
-TMP_DIR=".ablation_tmp"
-RUNS_DIR="runs"
-TRAIN_SCRIPT="train_seq2seq.py"
-EVAL_SCRIPT="eval_seq2seq.py"
+# 读取原配置中的 training.output_dir 作为“根目录”
+BASE_OUTPUT_DIR=$(python - <<'PY' "$BASE_CFG"
+import sys, yaml, os
+cfg_path = sys.argv[1]
+with open(cfg_path, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
+out = (cfg.get("training") or {}).get("output_dir")
+print(out if out else "")
+PY
+)
 
-EVAL_SPLIT="test"
-DECODE="beam"
-BEAM_SIZE=5
-MAX_NEW_TOKENS=128
+if [[ -z "${BASE_OUTPUT_DIR}" ]]; then
+  echo "[ERR] 'training.output_dir' not found in ${BASE_CFG}. Please set it in your config."
+  exit 1
+fi
 
-# Faster dev
-MAX_STEPS_OVERRIDE=10000
+# 统一把所有本次消融的结果放在 原配置目录/ablation_时间戳/...
+EXP_ROOT="${BASE_OUTPUT_DIR%/}/ablation_${TS}"
+CFG_DIR="${EXP_ROOT}/configs"
+LOG_DIR="${EXP_ROOT}/logs"
+CSV="${EXP_ROOT}/summary.csv"
+mkdir -p "${CFG_DIR}" "${LOG_DIR}"
 
-# ---------- YAML override helper (reuse your original) ----------
-override_yaml() {
-  local base_yaml="$1"
-  local out_yaml="$2"
-  shift 2
-  python - "$base_yaml" "$out_yaml" "$@" <<'PYCODE'
-import sys, yaml
-base, out = sys.argv[1], sys.argv[2]
-pairs = sys.argv[3:]
-cfg = yaml.safe_load(open(base, 'r')) or {}
+# 6 runs
+declare -a RUNS=(
+  "pe=sinusoidal dr=0.2 nh=4 tie=false"
+  "pe=learned    dr=0.2 nh=4 tie=false"
+  "pe=none       dr=0.2 nh=4 tie=false"
+  "pe=sinusoidal dr=0.0 nh=4 tie=false"
+  "pe=sinusoidal dr=0.2 nh=2 tie=false"
+  "pe=sinusoidal dr=0.2 nh=4 tie=true"
+)
 
-def parse_value(v):
-    try:
-        return yaml.safe_load(v)
-    except Exception:
-        return v
+echo "run_id,pe,dr,nh,tie,tf_loss,tf_acc,tf_bleu,tf_rouge,tf_rep1,tf_rep2,gen_bleu,gen_rouge,gen_rep1,gen_rep2" > "${CSV}"
 
-def set_by_path(d, path, value):
-    cur = d
-    keys = path.split('.')
-    for k in keys[:-1]:
-        if k not in cur or not isinstance(cur[k], dict):
-            cur[k] = {}
-        cur = cur[k]
-    cur[keys[-1]] = value
+# 将派生配置写到 outcfg，并把其中的 training.output_dir = <BASE_OUTPUT_DIR>/ablation_TS/<run_id>
+write_cfg () {
+  local base="$1" out="$2" outdir="$3" pe="$4" dr="$5" nh="$6" tie="$7"
+  python - "$base" "$out" "$outdir" "$pe" "$dr" "$nh" "$tie" <<'PY'
+import sys, yaml, os
+base, out, outdir, pe, dr, nh, tie = sys.argv[1:]
+with open(base, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f) or {}
 
-for p in pairs:
-    k, v = p.split('=', 1)
-    set_by_path(cfg, k, parse_value(v))
+mcfg = cfg.setdefault("model", {})
+mcfg["positional_encoding"] = pe
+mcfg["dropout"] = float(dr)
+mcfg["n_heads"] = int(nh)
+mcfg["tie_weights"] = (tie.lower() == "true")
 
-yaml.safe_dump(cfg, open(out, 'w'), sort_keys=False, allow_unicode=True)
-PYCODE
-}
+tcfg = cfg.setdefault("training", {})
+tcfg["output_dir"] = outdir  # 关键：保存到 原配置目录/ablation_TS/<run_id>
 
-align_cfg_to_ckpt() {
-  local cfg_path="$1"
-  local ckpt_path="$2"
-  python - "$cfg_path" "$ckpt_path" <<'PY'
-import sys, yaml, torch
-cfg_path, ckpt_path = sys.argv[1], sys.argv[2]
-cfg = yaml.safe_load(open(cfg_path, 'r')) or {}
-model_cfg = dict(cfg.get("model") or {})
-ckpt = torch.load(ckpt_path, map_location="cpu")
-state = ckpt.get("model", ckpt)
-enc_key = "enc_layers.0.ffn.fc1.weight"
-dec_key = "dec_layers.0.ffn.fc1.weight"
-ffn_w = state.get(enc_key)
-if ffn_w is None:
-    ffn_w = state.get(dec_key)
-if ffn_w is None:
-    print("[align] no ffn.fc1.weight in ckpt; skip.")
-    raise SystemExit(0)
-
-d_ff, d_model = int(ffn_w.shape[0]), int(ffn_w.shape[1])
-candidates = ["dim_feedforward", "ffn_hidden_dim", "d_ff", "mlp_dim"]
-ffn_key = next((k for k in candidates if k in model_cfg), "dim_feedforward")
-model_cfg[ffn_key] = d_ff
-if "d_model" in model_cfg:
-    model_cfg["d_model"] = d_model
-cfg["model"] = model_cfg
-yaml.safe_dump(cfg, open(cfg_path, 'w'), sort_keys=False, allow_unicode=True)
-print(f"[align] set {ffn_key}={d_ff}, d_model={d_model} in {cfg_path}")
+os.makedirs(outdir, exist_ok=True)
+with open(out, "w", encoding="utf-8") as f:
+    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+print(f"[CFG] wrote {out} -> training.output_dir={outdir}")
 PY
 }
 
-extract_rouge() {
-  local line="$1"
-  local r1 r2 rl n
-  n=$(echo "$line" | sed -n 's/.*samples=\([0-9]\+\).*/\1/p')
-  r1=$(echo "$line" | sed -n 's/.*ROUGE-1=\([0-9.]\+\).*/\1/p')
-  r2=$(echo "$line" | sed -n 's/.*ROUGE-2=\([0-9.]\+\).*/\1/p')
-  rl=$(echo "$line" | sed -n 's/.*ROUGE-L=\([0-9.]\+\).*/\1/p')
-  echo -e "${n}\t${r1}\t${r2}\t${rl}"
+append_metrics () {
+  local run_id="$1" pe="$2" dr="$3" nh="$4" tie="$5" logf="$6"
+  local tf_loss="" tf_acc="" tf_bleu="" tf_rouge="" tf_rep1="" tf_rep2=""
+  local gen_bleu="" gen_rouge="" gen_rep1="" gen_rep2=""
+
+  local tf_line
+  tf_line=$(grep -E "^\[(TF|Test)\]\[Summary\]" -m1 "$logf" || true)
+  if [[ -z "$tf_line" ]]; then
+    tf_line=$(grep -E "^\[Test\] Loss=" -m1 "$logf" || true)
+  fi
+  if [[ -n "$tf_line" ]]; then
+    tf_loss=$(echo "$tf_line"  | sed -n 's/.*Loss=\([0-9.]*\).*/\1/p' | head -1)
+    tf_acc=$(echo "$tf_line"   | sed -n 's/.*Acc=\([0-9.]*\)%.*/\1/p' | head -1)
+    tf_bleu=$(echo "$tf_line"  | sed -n 's/.*BLEU=\([0-9.]*\).*/\1/p' | head -1)
+    tf_rouge=$(echo "$tf_line" | sed -n 's/.*ROUGE-L(F1)=\([0-9.]*\).*/\1/p' | head -1)
+    tf_rep1=$(echo "$tf_line"  | sed -n 's/.*Repetition@1=\([0-9.]*\)%.*/\1/p' | head -1)
+    tf_rep2=$(echo "$tf_line"  | sed -n 's/.*Repetition@2=\([0-9.]*\)%.*/\1/p' | head -1)
+  fi
+
+  local gen_line
+  gen_line=$(grep -E "^\[GEN\]\[Summary\]" -m1 "$logf" || true)
+  if [[ -n "$gen_line" ]]; then
+    gen_bleu=$(echo "$gen_line"  | sed -n 's/.*BLEU=\([0-9.]*\).*/\1/p' | head -1)
+    gen_rouge=$(echo "$gen_line" | sed -n 's/.*ROUGE-L(F1)=\([0-9.]*\).*/\1/p' | head -1)
+    gen_rep1=$(echo "$gen_line"  | sed -n 's/.*Repetition@1=\([0-9.]*\)%.*/\1/p' | head -1)
+    gen_rep2=$(echo "$gen_line"  | sed -n 's/.*Repetition@2=\([0-9.]*\)%.*/\1/p' | head -1)
+  fi
+
+  echo "${run_id},${pe},${dr},${nh},${tie},${tf_loss},${tf_acc},${tf_bleu},${tf_rouge},${tf_rep1},${tf_rep2},${gen_bleu},${gen_rouge},${gen_rep1},${gen_rep2}" >> "${CSV}"
 }
 
-mkdir -p "$TMP_DIR"
-if [ ! -f "$RESULTS_TSV" ]; then
-  echo -e "timestamp\trun_name\toptimizer\tlr\tbetas_or_momentum\tposenc\tdropout\tscheduler\taccum_steps\tmax_steps\tn_layers\ttie_weights\tsamples\tROUGE-1\tROUGE-2\tROUGE-L\tckpt" > "$RESULTS_TSV"
-fi
+echo "[INFO] Base config: ${BASE_CFG}"
+echo "[INFO] Base output_dir: ${BASE_OUTPUT_DIR}"
+echo "[INFO] This run root:   ${EXP_ROOT}"
 
-# Common knobs
-OPT="adamw"
-LR="0.0005"
-B1="0.9"
-B2="0.98"
-SCH="noam"
-ACC="1"
+i=0
+for RUN in "${RUNS[@]}"; do
+  i=$((i+1))
+  pe="sinusoidal"; dr="0.2"; nh="4"; tie="false"
+  for kv in ${RUN}; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    case "$k" in
+      pe)  pe="$v" ;;
+      dr)  dr="$v" ;;
+      nh)  nh="$v" ;;
+      tie) tie="$v" ;;
+      *)   echo "[WARN] unknown key '$k'";;
+    esac
+  done
 
-# Define the 6 runs
-declare -a RUNS=(
-  # 1) Baseline
-  "pe=sinusoidal dr=0.1 nl=4 tie=false"
-  # 2) Learned PE
-  "pe=learned dr=0.1 nl=4 tie=false"
-  # 3) No PE
-  "pe=none dr=0.1 nl=4 tie=false"
-  # 4) Dropout 0.0
-  "pe=sinusoidal dr=0.0 nl=4 tie=false"
-  # 5) Fewer layers (2)
-  "pe=sinusoidal dr=0.1 nl=2 tie=false"
-  # 6) Weight tying
-  "pe=sinusoidal dr=0.1 nl=4 tie=true"
-)
+  run_id="pe-${pe}_dr-${dr}_nh-${nh}_tie-${tie}"
+  run_id="${run_id//./_}"
 
-for spec in "${RUNS[@]}"; do
-  # parse spec
-  eval "$spec"   # sets pe, dr, nl, tie
+  outdir="${EXP_ROOT}/${run_id}"          # <== 位于你的配置目录之下
+  outcfg="${CFG_DIR}/${run_id}.yaml"
+  logfile="${LOG_DIR}/${run_id}.log"
 
-  RUN_NAME="minabl_pe-${pe}_dr-${dr}_nl-${nl}_tie-${tie}"
-  CFG_PATH="${TMP_DIR}/${RUN_NAME}.yaml"
+  echo ""
+  echo "========== [${i}/${#RUNS[@]}] ${run_id} =========="
+  write_cfg "${BASE_CFG}" "${outcfg}" "${outdir}" "${pe}" "${dr}" "${nh}" "${tie}"
 
+  echo "[RUN] Training..."
+  if ! python train.py --config "${outcfg}" --mode train 2>&1 | tee "${logfile}"; then
+    echo "[ERR] Training failed for ${run_id}, see ${logfile}"
+    append_metrics "${run_id}" "${pe}" "${dr}" "${nh}" "${tie}" "${logfile}"
+    continue
+  fi
 
-  OV=(
-    "run_name=${RUN_NAME}"
-    "optim.name=${OPT}"
-    "optim.lr=${LR}"
-    "optim.betas=[${B1},${B2}]"
-    "sched.scheduler=${SCH}"
-    "train.accum_steps=${ACC}"
-    "model.positional_encoding=${pe}"
-    "model.dropout=${dr}"
-    "model.n_layers=${nl}"
-    "model.tie_weights=${tie}"
-  )
-  if [ -n "${MAX_STEPS_OVERRIDE:-}" ]; then OV+=("train.max_steps=${MAX_STEPS_OVERRIDE}"); fi
+  echo "[RUN] Testing..."
+  if ! python train.py --config "${outcfg}" --mode test 2>&1 | tee -a "${logfile}"; then
+    echo "[ERR] Testing failed for ${run_id}, see ${logfile}"
+    append_metrics "${run_id}" "${pe}" "${dr}" "${nh}" "${tie}" "${logfile}"
+    continue
+  fi
 
-  override_yaml "$BASE_CFG" "$CFG_PATH" "${OV[@]}"
-
-  echo "==== Train: ${RUN_NAME} ===="
-  python "$TRAIN_SCRIPT" --config "$CFG_PATH"
-
-  # ckpt path (按你原先的惯例)
-  CKPT="${RUNS_DIR}/${RUN_NAME}/best.pt"
-  [ -f "$CKPT" ] || { echo "skip eval (no ckpt)"; continue; }
-
-  # align
-  align_cfg_to_ckpt "$CFG_PATH" "$CKPT"
-
-  echo "==== Eval: ${RUN_NAME} ===="
-  EVAL_OUT=$(python "$EVAL_SCRIPT" --config "$CFG_PATH" --ckpt "$CKPT" --split "$EVAL_SPLIT" --decode "$DECODE" --beam_size "$BEAM_SIZE" --max_new_tokens "$MAX_NEW_TOKENS" || true)
-  LINE=$(echo "$EVAL_OUT" | tail -n 1); read SAMPLES R1 R2 RL < <(extract_rouge "$LINE")
-  TS=$(date +"%Y-%m-%d %H:%M:%S")
-  MAX_STEPS=$(python - <<'PYREAD' "$CFG_PATH"
-import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["train"]["max_steps"])
-PYREAD
-  )
-  echo -e "${TS}\t${RUN_NAME}\t${OPT}\t${LR}\tbeta1=${B1},beta2=${B2}\t${pe}\t${dr}\t${SCH}\t${ACC}\t${MAX_STEPS}\t${nl}\t${tie}\t${SAMPLES}\t${R1}\t${R2}\t${RL}\t${CKPT}" >> "$RESULTS_TSV"
+  append_metrics "${run_id}" "${pe}" "${dr}" "${nh}" "${tie}" "${logfile}"
 done
 
-echo "Done. Results in ${RESULTS_TSV}"
+echo ""
+echo "[DONE] Ablation finished. Summary CSV: ${CSV}"
+echo "[TIP ] View quick table:"
+echo "       column -s, -t < ${CSV} | less -#2 -N"
